@@ -46,15 +46,22 @@ func parseSeq(path string) (int, error) {
 // Lock attempts to acquire the lock. It works like LockWithData, but it doesn't
 // write any data to the lock node.
 func (l *Lock) Lock() error {
-	return l.LockWithData([]byte{})
+	_, err := l.LockWithData(false, []byte{})
+	return err
+}
+
+// Lock attempts to acquire the lock. It works like LockWithData, but it doesn't
+// write any data to the lock node.
+func (l *Lock) TryLock() (bool, error) {
+	return l.LockWithData(true, []byte{})
 }
 
 // LockWithData attempts to acquire the lock, writing data into the lock node.
 // It will wait to return until the lock is acquired or an error occurs. If
 // this instance already has the lock then ErrDeadlock is returned.
-func (l *Lock) LockWithData(data []byte) error {
+func (l *Lock) LockWithData(try bool, data []byte) (bool, error) {
 	if l.lockPath != "" {
-		return ErrDeadlock
+		return false, ErrDeadlock
 	}
 
 	prefix := fmt.Sprintf("%s/lock-", l.path)
@@ -72,35 +79,36 @@ func (l *Lock) LockWithData(data []byte) error {
 				pth += "/" + p
 				exists, _, err = l.c.Exists(pth)
 				if err != nil {
-					return err
+					return false, err
 				}
 				if exists == true {
 					continue
 				}
 				_, err = l.c.Create(pth, []byte{}, 0, l.acl)
 				if err != nil && err != ErrNodeExists {
-					return err
+					return false, err
 				}
 			}
 		} else if err == nil {
 			break
 		} else {
-			return err
+			return false, err
 		}
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	seq, err := parseSeq(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 
+	ret := true
 	for {
 		children, _, err := l.c.Children(l.path)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		lowestSeq := seq
@@ -109,7 +117,7 @@ func (l *Lock) LockWithData(data []byte) error {
 		for _, p := range children {
 			s, err := parseSeq(p)
 			if err != nil {
-				return err
+				return false, err
 			}
 			if s < lowestSeq {
 				lowestSeq = s
@@ -125,10 +133,16 @@ func (l *Lock) LockWithData(data []byte) error {
 			break
 		}
 
+		if try {
+			// Just tried to acquire lock
+			ret = false
+			break
+		}
+
 		// Wait on the node next in line for the lock
 		_, _, ch, err := l.c.GetW(l.path + "/" + prevSeqPath)
 		if err != nil && err != ErrNoNode {
-			return err
+			return false, err
 		} else if err != nil && err == ErrNoNode {
 			// try again
 			continue
@@ -136,13 +150,13 @@ func (l *Lock) LockWithData(data []byte) error {
 
 		ev := <-ch
 		if ev.Err != nil {
-			return ev.Err
+			return false, ev.Err
 		}
 	}
 
 	l.seq = seq
 	l.lockPath = path
-	return nil
+	return ret, nil
 }
 
 // Unlock releases an acquired lock. If the lock is not currently acquired by
